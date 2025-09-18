@@ -1,19 +1,27 @@
-# app.py — Flask + MQTT + SQLite (WAL) + Auth + Dashboard APIs (TH time, realtime KPI)
+# app.py — Flask + MQTT + SQLite (WAL) + Auth + Dashboard APIs (Render/CORS-ready)
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify
 from functools import wraps
-import sqlite3, datetime, json, threading
+import sqlite3, datetime, json, threading, os
 import paho.mqtt.client as mqtt
 from werkzeug.security import check_password_hash, generate_password_hash
 from pathlib import Path
+from flask_cors import CORS
 
-# ===== Config =====
-DATABASE = Path(__file__).with_name("users.db")
-SECRET_KEY = "change-me-please-very-secret"   # เปลี่ยนใน production
+# ===== Config (อ่านได้จาก ENV เพื่อใช้บน Render) =====
+DATABASE_PATH = os.environ.get("DATABASE_PATH", str(Path(__file__).with_name("users.db")))
+DATABASE = Path(DATABASE_PATH)
+SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-please-very-secret")  # เปลี่ยนใน production
 
 # MQTT broker/topic (ต้องตรงกับฝั่ง ESP32)
-MQTT_BROKER = "broker.mqttdashboard.com"
-MQTT_PORT   = 1883
-MQTT_TOPIC  = "cotto/energy/main"
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.mqttdashboard.com")
+MQTT_PORT   = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_TOPIC  = os.environ.get("MQTT_TOPIC", "cotto/energy/main")
+
+# อนุญาตให้เรียกข้ามโดเมนเฉพาะ origin ที่กำหนด (คั่นด้วย comma ได้หลายตัว)
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get(
+    "ALLOWED_ORIGINS",
+    "https://Nattapon0089.github.io"
+).split(",") if o.strip()]
 
 # SQLite PRAGMAs (ลดล็อก/รองรับ multi-thread)
 DB_PRAGMAS = [
@@ -23,10 +31,13 @@ DB_PRAGMAS = [
 ]
 
 # เกณฑ์ตัดสินว่า "ข้อมูลสด" (วินาที) ถ้าเกินนี้จะถือว่า stale และส่งค่า 0
-REALTIME_STALE_SEC = 8
+REALTIME_STALE_SEC = int(os.environ.get("REALTIME_STALE_SEC", "8"))
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = SECRET_KEY
+
+# เปิด CORS เฉพาะเส้นทาง /api/*
+CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
 
 # ========= Helpers =========
 def to_th_iso(ts_iso: str) -> str:
@@ -183,7 +194,7 @@ def mqtt_worker():
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_forever()
 
-# ===== Routes =====
+# ===== Routes (Web UI ยังล็อกอินตามเดิม) =====
 @app.route("/")
 def index():
     return redirect(url_for("login"))
@@ -275,12 +286,12 @@ def profile():
     )
 
 # ---------- API สำหรับ Dashboard ----------
+# ปลดล็อก login_required เพื่อให้ GitHub Pages เรียกข้ามโดเมนได้
 @app.route("/api/history")
-@login_required
 def api_history():
     """
     ส่งค่าล่าสุด N แถว สำหรับ plot chart (เรียงจากเก่า -> ใหม่)
-    เพิ่มการแปลงเวลาเป็นไทยฝั่ง API ให้พร้อมใช้ทันที
+    แปลงเวลาเป็นไทยฝั่ง API
     """
     n = int(request.args.get("n", 100))
     ensure_readings_schema()
@@ -297,9 +308,8 @@ def api_history():
     return jsonify(data)
 
 @app.route("/api/latest")
-@login_required
 def api_latest():
-    """(เดิม) ส่งค่าแถวล่าสุดจาก DB — ยังคงไว้เผื่อใช้งาน"""
+    """ส่งค่าแถวล่าสุดจาก DB (คงไว้เผื่อใช้งาน)"""
     ensure_readings_schema()
     db = get_db()
     row = db.execute("""
@@ -313,7 +323,6 @@ def api_latest():
     return jsonify({})
 
 @app.route("/api/realtime")
-@login_required
 def api_realtime():
     """
     ส่งค่าจาก memory (latest_reading) แบบ realtime
@@ -357,7 +366,6 @@ def api_realtime():
     return jsonify(payload)
 
 @app.route("/api/monthly")
-@login_required
 def api_monthly():
     """
     ส่งข้อมูลแบบ day-level (เลือกค่าแรกของแต่ละวัน)
@@ -423,21 +431,31 @@ def api_readings():
         }
     return jsonify({"ok": True})
 
-# ===== main =====
-if __name__ == "__main__":
-    # เตรียม DB + admin ครั้งแรก
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "time": datetime.datetime.utcnow().isoformat()+"Z"})
+
+# ===== Bootstrap (สำคัญ: ให้ทำงานเมื่อรันด้วย gunicorn app:app) =====
+_mqtt_started = False
+def bootstrap():
+    global _mqtt_started
     with app.app_context():
         ensure_users_schema()
         ensure_readings_schema()
         init_admin_if_missing()
-        # set PRAGMAs ให้ connection หลักด้วย
         db = get_db()
         for p in DB_PRAGMAS:
             db.execute(p)
         db.commit()
+    if not _mqtt_started:
+        # หมายเหตุ: เพื่อหลีกเลี่ยง MQTT ซ้ำหลายตัว ควรตั้ง gunicorn ให้ใช้ --workers=1
+        threading.Thread(target=mqtt_worker, daemon=True).start()
+        _mqtt_started = True
 
-    # สตาร์ต MQTT worker 1 ตัว (ปิด reloader กัน thread ซ้ำตอน debug)
-    threading.Thread(target=mqtt_worker, daemon=True).start()
-    app.jinja_env.auto_reload = True
-    app.config["TEMPLATES_AUTO_RELOAD"] = True
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+bootstrap()
+
+# ===== main (รันท้องถิ่น) =====
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    # ปิด reloader เพื่อไม่ให้ MQTT thread ถูกสตาร์ตซ้ำ
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
