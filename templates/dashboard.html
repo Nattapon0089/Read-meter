@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}My Profile{% endblock %}
+{% block content %}
+
+<article class="card">
+  <header>
+    <h3>โปรไฟล์ของฉัน</h3>
+    <p>ยินดีต้อนรับ, <b>{{ username }}</b> <small>(role: {{ role }})</small></p>
+  </header>
+
+  <form method="post">
+    <div class="grid">
+      <label>Plant
+        <input type="text" name="plant" value="{{ profile.plant or '' }}" placeholder="เช่น COTTO-01">
+      </label>
+      <label>Firstname
+        <input type="text" name="firstname" value="{{ profile.firstname or '' }}">
+      </label>
+      <label>Lastname
+        <input type="text" name="lastname" value="{{ profile.lastname or '' }}">
+      </label>
+    </div>
+
+    <div class="grid">
+      <label>Email
+        <input type="email" name="email" value="{{ profile.email or '' }}" placeholder="name@example.com">
+      </label>
+      <label>Username (อ่านอย่างเดียว)
+        <input type="text" value="{{ profile.username }}" disabled>
+      </label>
+      <label>Role (อ่านอย่างเดียว)
+        <input type="text" value="{{ profile.role }}" disabled>
+      </label>
+    </div>
+
+    <div class="grid">
+      <label>Position
+        <input type="text" name="position" value="{{ profile.position or '' }}">
+      </label>
+      <label>Section
+        <input type="text" name="section" value="{{ profile.section or '' }}">
+      </label>
+      <label>ตั้งรหัสผ่านใหม่ (ถ้าต้องการ)
+        <input type="password" name="new_password" placeholder="ปล่อยว่างถ้าไม่เปลี่ยน">
+      </label>
+    </div>
+
+    <button type="submit">บันทึกโปรไฟล์</button>
+  </form>
+</article>
+
+<article class="card" style="margin-top:1rem">
+  <header><h4>ข้อมูลระบบ</h4></header>
+  <p><b>User ID:</b> {{ profile.id }} &nbsp; • &nbsp; <b>สร้างเมื่อ:</b> {{ profile.created_at }}</p>
+  <footer>
+    <a href="{{ url_for('logout') }}" role="button" class="secondary">ออกจากระบบ</a>
+  </footer>
+</article>
+
+{% endblock %}

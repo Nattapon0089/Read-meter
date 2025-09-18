@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<!-- ====== tiny styles สำหรับ layout ที่อัดแน่นขึ้น ====== -->
+<style>
+  .kpi-row .card { border: none; color:#fff; }
+  .kpi-row .card .value { font-size: 1.6rem; font-weight: 800; line-height: 1; }
+  .kpi-row .card .label { opacity:.9; font-size:.9rem; }
+  .kpi-blue   { background:#1e63ff; }
+  .kpi-green  { background:#168a4a; }
+  .kpi-red    { background:#cb2444; }
+  .kpi-amber  { background:#f29f05; color:#1a1a1a; }
+  .kpi-cyan   { background:#09a9c3; }
+  .kpi-gray   { background:#5b6470; }
+  .card-compact { padding: .75rem 1rem; }
+  .card-compact h6 { margin:0 0 .25rem; font-size:.95rem; font-weight:700; }
+  .chart-wrap { height: 220px; }          /* กำหนดความสูงกราฟให้เตี้ยลง */
+  .table-fixed { max-height: 280px; overflow:auto; }
+  .form-inline { gap:.5rem; display:flex; align-items:center; justify-content:flex-end; }
+  .badge-src { font-size:.75rem; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h3 class="mb-0">Energy Dashboard</h3>
+  <div class="form-inline">
+    <!-- เลือก ปี / เดือน -->
+    <select id="yearSelect" class="form-select form-select-sm" style="width:auto"></select>
+    <select id="monthSelect" class="form-select form-select-sm" style="width:auto">
+      <option value="01">01</option><option value="02">02</option><option value="03">03</option>
+      <option value="04">04</option><option value="05">05</option><option value="06">06</option>
+      <option value="07">07</option><option value="08">08</option><option value="09">09</option>
+      <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+    </select>
+    <button id="applyBtn" class="btn btn-sm btn-primary">Filter</button>
+  </div>
+</div>
+
+<!-- KPI: 6 กล่องในแถวเดียว (บนจอเล็กจะหักลงเอง) -->
+<div class="row g-3 kpi-row mb-2">
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="card kpi-blue h-100">
+      <div class="card-body py-3">
+        <div class="label">Voltage (V)</div>
+        <div id="kpiV" class="value">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="card kpi-green h-100">
+      <div class="card-body py-3">
+        <div class="label">Current (A)</div>
+        <div id="kpiI" class="value">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="card kpi-red h-100">
+      <div class="card-body py-3">
+        <div class="label">Power (W)</div>
+        <div id="kpiP" class="value">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="card kpi-amber h-100">
+      <div class="card-body py-3">
+        <div class="label">Energy (kWh)</div>
+        <div id="kpiE" class="value">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="card kpi-cyan h-100">
+      <div class="card-body py-3">
+        <div class="label">Frequency (Hz)</div>
+        <div id="kpiHz" class="value">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="card kpi-gray h-100">
+      <div class="card-body py-3">
+        <div class="label">PF</div>
+        <div id="kpiPF" class="value">-</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- แหล่งข้อมูล -->
+<p class="mb-2"><span class="badge bg-secondary badge-src">อัปเดตอัตโนมัติจาก MQTT/ESP32 &nbsp;•&nbsp; แสดงค่าแรกของแต่ละวันในเดือนที่เลือก (เวลาไทย)</span></p>
+
+<!-- กราฟ 6 ใบ: 3 ใบต่อแถว -->
+<div class="row g-3">
+  <div class="col-lg-4">
+    <div class="card card-compact h-100">
+      <h6>Voltage — Line</h6>
+      <div class="chart-wrap"><canvas id="chartV"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card card-compact h-100">
+      <h6>Current — Bar</h6>
+      <div class="chart-wrap"><canvas id="chartI"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card card-compact h-100">
+      <h6>Power — Bar</h6>
+      <div class="chart-wrap"><canvas id="chartP"></canvas></div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card card-compact h-100">
+      <h6>Energy (kWh) — Bar</h6>
+      <div class="chart-wrap"><canvas id="chartE"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card card-compact h-100">
+      <h6>Frequency — Line</h6>
+      <div class="chart-wrap"><canvas id="chartHz"></canvas></div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card card-compact h-100">
+      <h6>Power Factor — Gauge</h6>
+      <div class="chart-wrap"><canvas id="chartPF"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- Raw Data ย่อความสูง + สกรอลล์ -->
+<div class="card mt-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center">
+      <h6 class="mb-2">Raw Data (ทั้งหมด)</h6>
+      <small class="text-muted">อัปเดตทุก 5 วินาที</small>
+    </div>
+    <div class="table-responsive table-fixed">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Time (TH)</th><th>V</th><th>A</th><th>W</th><th>kWh</th><th>Hz</th><th>PF</th>
+          </tr>
+        </thead>
+        <tbody id="rawBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ====== libs ====== -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+<script src="https://cdn.jsdelivr.net/npm/moment@2.30.1/min/moment.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/moment-timezone@0.5.45/builds/moment-timezone-with-data.min.js"></script>
+
+<script>
+/* ===== helpers ===== */
+const TH_TZ = "Asia/Bangkok";
+function thDayLabel(iso) {
+  // รับ ISO (UTC/naive) -> label วันแบบไทย (YYYY-MM-DD)
+  return moment.tz(iso, TH_TZ).format("YYYY-MM-DD");
+}
+function thDateTime(iso) {
+  return moment.tz(iso, TH_TZ).format("YYYY-MM-DD HH:mm:ss");
+}
+function firstOfEachDayForMonth(rows, year, month) {
+  // rows: [{ts,...}] -> คืนรายการที่ "ค่าแรกของแต่ละวัน" ในเดือนที่เลือก (เวลาประเทศไทย)
+  const y = String(year), m = String(month).padStart(2,"0");
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const day = thDayLabel(r.ts);           // YYYY-MM-DD (TH)
+    if (!day.startsWith(`${y}-${m}`)) continue;
+    if (seen.has(day)) continue;            // เอาเฉพาะค่าแรกของวันนั้น
+    seen.add(day);
+    out.push({...r, day});
+  }
+  // เรียงวันน้อย->มาก
+  out.sort((a,b) => a.day.localeCompare(b.day));
+  return out;
+}
+
+/* ===== fill year select ===== */
+(function initYearMonth() {
+  const now = moment.tz(TH_TZ);
+  const ySel = document.getElementById('yearSelect');
+  for (let y = now.year() - 3; y <= now.year()+1; y++) {
+    const opt = document.createElement('option');
+    opt.value = String(y); opt.textContent = y;
+    if (y === now.year()) opt.selected = true;
+    ySel.appendChild(opt);
+  }
+  document.getElementById('monthSelect').value = now.format("MM");
+})();
+
+/* ===== KPI & Raw table refresh (ทุก 5 วิ) ===== */
+async function refreshLatest() {
+  const r = await fetch('/api/latest'); const d = await r.json();
+  if (!d || !d.ts) return;
+  document.getElementById('kpiV').textContent  = (d.voltage ?? '-');
+  document.getElementById('kpiI').textContent  = (d.current ?? '-');
+  document.getElementById('kpiP').textContent  = (d.power ?? '-');
+  document.getElementById('kpiE').textContent  = (d.energy_kwh ?? '-');
+  document.getElementById('kpiHz').textContent = (d.frequency ?? '-');
+  document.getElementById('kpiPF').textContent = (d.pf ?? '-');
+}
+
+async function refreshRaw() {
+  const r = await fetch('/api/history?n=300'); const rows = await r.json();
+  const body = document.getElementById('rawBody');
+  body.innerHTML = '';
+  rows.reverse(); // ใหม่อยู่ล่าง? เอาเก่าสุดก่อนก็ได้ตามชอบ
+  for (const x of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${thDateTime(x.ts)}</td>
+      <td>${x.voltage ?? ''}</td>
+      <td>${x.current ?? ''}</td>
+      <td>${x.power ?? ''}</td>
+      <td>${x.energy_kwh ?? ''}</td>
+      <td>${x.frequency ?? ''}</td>
+      <td>${x.pf ?? ''}</td>`;
+    body.appendChild(tr);
+  }
+}
+
+/* ===== Charts ===== */
+let chV, chI, chP, chE, chHz, chPF;
+
+function lineCfg(label) {
+  return {
+    type:'line',
+    data:{labels:[], datasets:[{label, data:[], tension:.3}]},
+    options:{responsive:true, maintainAspectRatio:false,
+      scales:{x:{ticks:{autoSkip:true, maxTicksLimit:8}}}
+    }
+  }
+}
+function barCfg(label) {
+  return {
+    type:'bar',
+    data:{labels:[], datasets:[{label, data:[]}]},
+    options:{responsive:true, maintainAspectRatio:false,
+      scales:{x:{ticks:{autoSkip:true, maxTicksLimit:8}}}
+    }
+  }
+}
+function gaugeCfg() {
+  // เกจแบบ doughnut (0–1)
+  return {
+    type:'doughnut',
+    data:{
+      labels:['PF',''],
+      datasets:[{data:[0,1], cutout:'70%'}]
+    },
+    options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}}
+  }
+}
+
+function initCharts() {
+  chV  = new Chart(document.getElementById('chartV'),  lineCfg('Voltage (V)'));
+  chI  = new Chart(document.getElementById('chartI'),  barCfg('Current (A)'));
+  chP  = new Chart(document.getElementById('chartP'),  barCfg('Power (W)'));
+  chE  = new Chart(document.getElementById('chartE'),  barCfg('Energy (kWh)'));
+  chHz = new Chart(document.getElementById('chartHz'), lineCfg('Frequency (Hz)'));
+  chPF = new Chart(document.getElementById('chartPF'), gaugeCfg());
+}
+
+async function loadMonth() {
+  const year  = document.getElementById('yearSelect').value;
+  const month = document.getElementById('monthSelect').value;
+  const r = await fetch('/api/history?n=5000');
+  const rows = await r.json();
+
+  const days = firstOfEachDayForMonth(rows, year, month);
+  const labels = days.map(d => d.day);
+
+  // อัปเดตกราฟ
+  chV.data.labels=labels;   chV.data.datasets[0].data = days.map(d=>d.voltage ?? null); chV.update();
+  chI.data.labels=labels;   chI.data.datasets[0].data = days.map(d=>d.current ?? null); chI.update();
+  chP.data.labels=labels;   chP.data.datasets[0].data = days.map(d=>d.power ?? null);   chP.update();
+  chE.data.labels=labels;   chE.data.datasets[0].data = days.map(d=>d.energy_kwh ?? null); chE.update();
+  chHz.data.labels=labels;  chHz.data.datasets[0].data = days.map(d=>d.frequency ?? null); chHz.update();
+
+  // PF gauge แสดงค่าล่าสุดของเดือน (หรือ 0 ถ้าไม่มี)
+  const pf = days.length ? (days[days.length-1].pf ?? 0) : 0;
+  chPF.data.datasets[0].data = [pf, Math.max(0, 1 - pf)];
+  chPF.update();
+}
+
+/* ===== boot ===== */
+initCharts();
+loadMonth();           // โหลดครั้งแรกตามเดือนปัจจุบัน
+refreshLatest();
+refreshRaw();
+setInterval(refreshLatest, 5000);
+setInterval(refreshRaw,   5000);
+
+document.getElementById('applyBtn').addEventListener('click', loadMonth);
+</script>
+{% endblock %}
