@@ -2,21 +2,41 @@
 {% block title %}เข้าสู่ระบบ · COTTO Energy{% endblock %}
 {% block content %}
 
-<div class="d-flex justify-content-center mt-4">
-  <div class="card shadow-sm" style="width: 420px;">
-    <div class="card-body">
-      <h5 class="card-title mb-3">เข้าสู่ระบบ</h5>
-      <form method="post" novalidate>
-        <div class="mb-3">
-          <label class="form-label">ชื่อผู้ใช้</label>
-          <input type="text" name="username" class="form-control" placeholder="username" autofocus required>
-        </div>
-        <div class="mb-3">
-          <label class="form-label">รหัสผ่าน</label>
-          <input type="password" name="password" class="form-control" placeholder="••••••••" required>
-        </div>
-        <button class="btn btn-primary w-100" type="submit">Login</button>
-      </form>
+<style>
+  .auth-wrap { min-height: calc(100vh - 64px - 32px); }
+  .auth-card { width: 500px; max-width: 95vw; border: 0; }
+  .brand-badge { font-weight: 800; letter-spacing: .5px; }
+  .subtext { color:#6c757d; }
+</style>
+
+<div class="d-flex auth-wrap align-items-center justify-content-center">
+  <div>
+    <div class="text-center mb-3">
+      <div class="brand-badge h4 mb-1">COTTO Energy</div>
+      <div class="subtext small">Energy Monitoring Dashboard</div>
+    </div>
+
+    <div class="card shadow-sm auth-card mx-auto">
+      <div class="card-body p-5">
+        <h5 class="card-title mb-4 text-center">เข้าสู่ระบบ</h5>
+        <form method="post" novalidate>
+          <div class="mb-3">
+            <label class="form-label">ชื่อผู้ใช้</label>
+            <input type="text" name="username" class="form-control form-control-lg" placeholder="เช่น admin หรือ username ของคุณ" autocomplete="username" autofocus required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">รหัสผ่าน</label>
+            <input type="password" name="password" class="form-control form-control-lg" placeholder="••••••••" autocomplete="current-password" required>
+          </div>
+          <div class="d-grid mt-4">
+            <button class="btn btn-primary btn-lg" type="submit">Login</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="text-center mt-3 subtext small">
+      ใช้ครั้งแรก? ระบบมีผู้ดูแลเริ่มต้น <b>admin / admin</b> (ควรเปลี่ยนรหัสผ่านทันที)
     </div>
   </div>
 </div>

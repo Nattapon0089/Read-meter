@@ -1,4 +1,4 @@
-# app.py  — merged full version (MQTT + DB + Auth + Dashboard APIs)
+# app.py — Flask + MQTT + SQLite (WAL) + Auth + Dashboard APIs (TH time, realtime KPI)
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify
 from functools import wraps
 import sqlite3, datetime, json, threading
@@ -15,18 +15,38 @@ MQTT_BROKER = "broker.mqttdashboard.com"
 MQTT_PORT   = 1883
 MQTT_TOPIC  = "cotto/energy/main"
 
+# SQLite PRAGMAs (ลดล็อก/รองรับ multi-thread)
+DB_PRAGMAS = [
+    "PRAGMA journal_mode=WAL;",
+    "PRAGMA synchronous=NORMAL;",
+    "PRAGMA foreign_keys=ON;"
+]
+
+# เกณฑ์ตัดสินว่า "ข้อมูลสด" (วินาที) ถ้าเกินนี้จะถือว่า stale และส่งค่า 0
+REALTIME_STALE_SEC = 8
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = SECRET_KEY
 
 # ========= Helpers =========
 def to_th_iso(ts_iso: str) -> str:
-    """รับ ISO (UTC) -> คืน string เวลาไทย +07:00 (YYYY-MM-DD HH:MM:SS)"""
+    """รับ ISO (UTC) หรือรูปแบบลงท้ายด้วย 'Z' -> คืน string เวลาไทย +07:00 (YYYY-MM-DD HH:MM:SS)"""
     try:
-        ts = datetime.datetime.fromisoformat(ts_iso)
+        s = ts_iso.strip()
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")  # รองรับ ISO แบบ Zulu
+        ts = datetime.datetime.fromisoformat(s)
     except Exception:
         return ts_iso
     th = ts + datetime.timedelta(hours=7)
     return th.strftime("%Y-%m-%d %H:%M:%S")
+
+def _parse_iso_lenient(s: str) -> datetime.datetime:
+    """แปลง ISO ที่รองรับ Z เป็น datetime"""
+    ss = s.strip()
+    if ss.endswith("Z"):
+        ss = ss.replace("Z", "+00:00")
+    return datetime.datetime.fromisoformat(ss)
 
 # ===== DB helpers =====
 def get_db():
@@ -34,6 +54,8 @@ def get_db():
     if db is None:
         db = g._db = sqlite3.connect(DATABASE)
         db.row_factory = sqlite3.Row
+        for p in DB_PRAGMAS:
+            db.execute(p)
     return db
 
 @app.teardown_appcontext
@@ -66,7 +88,7 @@ def ensure_readings_schema():
     db.execute("""
     CREATE TABLE IF NOT EXISTS readings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts TEXT NOT NULL,                 -- เก็บเป็น ISO (UTC)
+        ts TEXT NOT NULL,                 -- เก็บเป็น ISO (UTC หรือ +00:00)
         voltage REAL,
         current REAL,
         power REAL,
@@ -97,62 +119,60 @@ def login_required(f):
     return wrapped
 
 # ====== MQTT (subscribe ใน thread แยก) ======
-latest_reading = {}   # เก็บค่าล่าสุดจาก MQTT (เพื่อโชว์ทันทีบนหน้าจอ)
+latest_reading = {}          # เก็บค่าล่าสุดจาก MQTT (เพื่อโชว์ทันทีบนหน้าจอ)
+latest_lock = threading.Lock()
 
 def on_connect(client, userdata, flags, rc):
     print("[MQTT] Connected:", rc)
     client.subscribe(MQTT_TOPIC)
     print(f"[MQTT] Subscribed: {MQTT_TOPIC}")
 
-def _insert_reading_row(payload_dict: dict):
-    """เปิด SQLite connection แยกใน thread MQTT, เขียนลง DB ให้ปลอดภัย"""
-    # mapping energy -> energy_kwh หากส่งมาเป็นชื่อ energy
-    energy_kwh = payload_dict.get("energy_kwh")
-    if energy_kwh is None and "energy" in payload_dict:
-        energy_kwh = payload_dict.get("energy")
-
-    ts = payload_dict.get("ts") or datetime.datetime.utcnow().isoformat()
-
-    conn = sqlite3.connect(DATABASE)
-    try:
-        conn.execute("""
-            INSERT INTO readings (ts, voltage, current, power, energy_kwh, frequency, pf)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (ts,
-              payload_dict.get("voltage"),
-              payload_dict.get("current"),
-              payload_dict.get("power"),
-              energy_kwh,
-              payload_dict.get("frequency"),
-              payload_dict.get("pf")))
-        conn.commit()
-    finally:
-        conn.close()
-    return ts, energy_kwh
-
 def on_message(client, userdata, msg):
+    """รับ payload จาก MQTT และเขียนลง SQLite + อัปเดต latest_reading (thread-safe)"""
     global latest_reading
     try:
         payload = msg.payload.decode("utf-8")
         data = json.loads(payload)
 
-        # ให้แน่ใจว่ามีตารางแล้ว (ครั้งแรก)
-        # ใช้ connection ใน context app ไม่ได้ใน thread นี้—ข้ามและใช้ _insert_reading_row แทน
-        ensure_readings_schema()  # safe แม้อยู่ต่าง thread เพราะแค่ CREATE IF NOT EXISTS
+        # map energy -> energy_kwh หากจำเป็น
+        energy_kwh = data.get("energy_kwh")
+        if energy_kwh is None and "energy" in data:
+            energy_kwh = data.get("energy")
 
-        ts, energy_kwh = _insert_reading_row(data)
+        # ts (ถ้าไม่ส่งมา ใช้ UTC now)
+        ts_raw = data.get("ts") or datetime.datetime.utcnow().isoformat()
 
-        # เก็บค่าไว้ในหน่วยความจำสำหรับโชว์ล่าสุด
-        latest_reading = {
-            "ts": ts,
-            "voltage": data.get("voltage"),
-            "current": data.get("current"),
-            "power": data.get("power"),
-            "energy_kwh": energy_kwh,
-            "frequency": data.get("frequency"),
-            "pf": data.get("pf"),
-        }
+        # เขียน DB ด้วย connection ของ thread ตัวเอง (ไม่ใช้ flask.g)
+        conn = sqlite3.connect(DATABASE)
+        try:
+            for p in DB_PRAGMAS:
+                conn.execute(p)
+            conn.execute("""
+                INSERT INTO readings (ts, voltage, current, power, energy_kwh, frequency, pf)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (ts_raw,
+                  data.get("voltage"),
+                  data.get("current"),
+                  data.get("power"),
+                  energy_kwh,
+                  data.get("frequency"),
+                  data.get("pf")))
+            conn.commit()
+        finally:
+            conn.close()
+
+        with latest_lock:
+            latest_reading = {
+                "ts": ts_raw,
+                "voltage": data.get("voltage"),
+                "current": data.get("current"),
+                "power": data.get("power"),
+                "energy_kwh": energy_kwh,
+                "frequency": data.get("frequency"),
+                "pf": data.get("pf"),
+            }
         print("[MQTT] -> DB & memory:", latest_reading)
+
     except Exception as e:
         print("[MQTT] Parse/DB error:", e)
 
@@ -203,13 +223,14 @@ def logout():
 @app.route("/home")
 @login_required
 def home():
-    # หน้า dashboard (ดึงค่าล่าสุดจาก memory เฉย ๆ)
+    with latest_lock:
+        reading_snapshot = dict(latest_reading) if latest_reading else {}
     return render_template(
         "home.html",
         active="home",
         username=session.get("username"),
         role=session.get("role"),
-        reading=latest_reading
+        reading=reading_snapshot
     )
 
 @app.route("/profile", methods=["GET", "POST"])
@@ -278,7 +299,7 @@ def api_history():
 @app.route("/api/latest")
 @login_required
 def api_latest():
-    """ส่งค่าแถวล่าสุด 1 แถว (เวลาแสดงเป็นไทย)"""
+    """(เดิม) ส่งค่าแถวล่าสุดจาก DB — ยังคงไว้เผื่อใช้งาน"""
     ensure_readings_schema()
     db = get_db()
     row = db.execute("""
@@ -291,12 +312,55 @@ def api_latest():
         return jsonify(d)
     return jsonify({})
 
+@app.route("/api/realtime")
+@login_required
+def api_realtime():
+    """
+    ส่งค่าจาก memory (latest_reading) แบบ realtime
+    - ถ้าไม่มีข้อมูล หรือเกิน REALTIME_STALE_SEC วินาที: คืนค่า 0 ทั้งหมด
+    """
+    with latest_lock:
+        snap = dict(latest_reading) if latest_reading else {}
+
+    now_utc = datetime.datetime.utcnow()
+
+    if not snap.get("ts"):
+        return jsonify({
+            "ts": to_th_iso(now_utc.isoformat()),
+            "voltage": 0, "current": 0, "power": 0, "energy_kwh": 0, "frequency": 0, "pf": 0,
+            "stale": True, "age_sec": None
+        })
+
+    try:
+        t = _parse_iso_lenient(snap["ts"])
+    except Exception:
+        t = now_utc
+
+    try:
+        age_sec = max(0, (now_utc - t.replace(tzinfo=None)).total_seconds())
+    except Exception:
+        age_sec = 0
+
+    stale = age_sec > REALTIME_STALE_SEC
+
+    payload = {
+        "ts": to_th_iso(snap["ts"]),
+        "voltage": 0 if stale else (snap.get("voltage") or 0),
+        "current": 0 if stale else (snap.get("current") or 0),
+        "power": 0 if stale else (snap.get("power") or 0),
+        "energy_kwh": 0 if stale else (snap.get("energy_kwh") or 0),
+        "frequency": 0 if stale else (snap.get("frequency") or 0),
+        "pf": 0 if stale else (snap.get("pf") or 0),
+        "stale": stale,
+        "age_sec": age_sec,
+    }
+    return jsonify(payload)
+
 @app.route("/api/monthly")
 @login_required
 def api_monthly():
     """
-    ส่งข้อมูลแบบ day-level (เลือกวันแรกที่บันทึกของแต่ละวัน)
-    ใช้สำหรับกราฟรายวันของเดือนนั้น
+    ส่งข้อมูลแบบ day-level (เลือกค่าแรกของแต่ละวัน)
     params: year, month
     """
     now = datetime.datetime.utcnow()
@@ -334,7 +398,6 @@ def api_readings():
     print("[API] Received:", data)
 
     ensure_readings_schema()
-    # map energy -> energy_kwh หากจำเป็น
     energy_kwh = data.get("energy_kwh")
     if energy_kwh is None and "energy" in data:
         energy_kwh = data.get("energy")
@@ -348,15 +411,16 @@ def api_readings():
           energy_kwh, data.get("frequency"), data.get("pf")))
     db.commit()
 
-    latest_reading = {
-        "ts": ts,
-        "voltage": data.get("voltage"),
-        "current": data.get("current"),
-        "power": data.get("power"),
-        "energy_kwh": energy_kwh,
-        "frequency": data.get("frequency"),
-        "pf": data.get("pf"),
-    }
+    with latest_lock:
+        latest_reading = {
+            "ts": ts,
+            "voltage": data.get("voltage"),
+            "current": data.get("current"),
+            "power": data.get("power"),
+            "energy_kwh": energy_kwh,
+            "frequency": data.get("frequency"),
+            "pf": data.get("pf"),
+        }
     return jsonify({"ok": True})
 
 # ===== main =====
@@ -366,6 +430,11 @@ if __name__ == "__main__":
         ensure_users_schema()
         ensure_readings_schema()
         init_admin_if_missing()
+        # set PRAGMAs ให้ connection หลักด้วย
+        db = get_db()
+        for p in DB_PRAGMAS:
+            db.execute(p)
+        db.commit()
 
     # สตาร์ต MQTT worker 1 ตัว (ปิด reloader กัน thread ซ้ำตอน debug)
     threading.Thread(target=mqtt_worker, daemon=True).start()
